@@ -154,22 +154,17 @@ export default function AnalysisScreen() {
       console.error('Error loading gauges:', error);
     }
   };
-
   const calculateSubgroups = (data: number[], size: number) => {
-    if (!Array.isArray(data) || data.length === 0) {
-      return [];
-    }
-
+    if (!data.length) return [];
+    
     const subgroups = [];
     for (let i = 0; i < data.length; i += size) {
       const subgroup = data.slice(i, i + size);
       if (subgroup.length === size) {
-        const validNumbers = subgroup.every(num => !isNaN(num));
-        if (validNumbers) {
-          subgroups.push({
-            mean: subgroup.reduce((a, b) => a + b, 0) / size,
-            range: Math.max(...subgroup) - Math.min(...subgroup)
-          });
+        const mean = subgroup.reduce((a, b) => a + b, 0) / size;
+        const range = Math.max(...subgroup) - Math.min(...subgroup);
+        if (!isNaN(mean) && isFinite(mean) && !isNaN(range) && isFinite(range)) {
+          subgroups.push({ mean, range });
         }
       }
     }
@@ -177,20 +172,16 @@ export default function AnalysisScreen() {
   };
 
   const calculateDistributionData = (specifications: number[]) => {
-    if (!Array.isArray(specifications) || specifications.length === 0) {
-      return { data: [], numberOfBins: 0 };
-    }
-
-    const validSpecs = specifications.filter(spec => !isNaN(spec));
-    if (validSpecs.length === 0) {
-      return { data: [], numberOfBins: 0 };
-    }
-
-    const numberOfBins = Math.ceil(Math.sqrt(validSpecs.length));
+    if (!specifications.length) return { data: [], numberOfBins: 0 };
+    
+    const numberOfBins = Math.max(1, Math.ceil(Math.sqrt(specifications.length)));
+    const validSpecs = specifications.filter(spec => !isNaN(spec) && isFinite(spec));
+    
+    if (!validSpecs.length) return { data: [], numberOfBins };
     
     const min = Math.min(...validSpecs);
     const max = Math.max(...validSpecs);
-    const binWidth = (max - min) / numberOfBins;
+    const binWidth = (max - min) / numberOfBins || 1; // Prevent division by zero
     
     const binCounts = new Array(numberOfBins).fill(0);
     validSpecs.forEach(spec => {
@@ -198,7 +189,9 @@ export default function AnalysisScreen() {
         Math.floor((spec - min) / binWidth),
         numberOfBins - 1
       );
-      binCounts[binIndex]++;
+      if (!isNaN(binIndex) && binIndex >= 0 && binIndex < numberOfBins) {
+        binCounts[binIndex]++;
+      }
     });
 
     return {
@@ -210,6 +203,8 @@ export default function AnalysisScreen() {
     };
   };
 
+
+  
   const handleAnalyze = async () => {
     if (!selectedShifts.length || !material || !operation || !gauge) {
       setError('Please select all required fields');
@@ -229,33 +224,30 @@ export default function AnalysisScreen() {
         selectedShifts
       );
 
-      if (!Array.isArray(inspectionData) || inspectionData.length === 0) {
-        setError('No data available for analysis');
-        setLoading(false);
-        return;
-      }
-
-      const filteredData = inspectionData.filter((data: { ShiftCode: number; }) => 
-        selectedShifts.includes(data.ShiftCode)
-      );
+      // Filter and validate data
+      const filteredData = inspectionData.filter((data: { 
+        ShiftCode: number; 
+        ActualSpecification: string;
+        FromSpecification: string;
+        ToSpecification: string;
+      }) => {
+        const actualSpec = parseFloat(data.ActualSpecification);
+        return selectedShifts.includes(data.ShiftCode) && 
+               !isNaN(actualSpec) && 
+               isFinite(actualSpec);
+      });
 
       if (filteredData.length === 0) {
-        setError('No data available for selected shifts');
-        setLoading(false);
-        return;
+        throw new Error('No valid data available for analysis');
       }
 
-      const specifications = filteredData.map(d => parseFloat(d.ActualSpecification))
-        .filter(spec => !isNaN(spec));
-
-      if (specifications.length === 0) {
-        setError('No valid specification data available');
-        setLoading(false);
-        return;
-      }
-
+      const specifications = filteredData.map(d => parseFloat(d.ActualSpecification));
       const subgroups = calculateSubgroups(specifications, sampleSize);
       
+      if (subgroups.length === 0) {
+        throw new Error('Insufficient data for selected sample size');
+      }
+
       const xBarData = subgroups.map((sg, i) => ({ x: i + 1, y: sg.mean }));
       const rangeData = subgroups.map((sg, i) => ({ x: i + 1, y: sg.range }));
 
@@ -268,7 +260,7 @@ export default function AnalysisScreen() {
         5: { A2: 0.483, D3: 0, D4: 2.115 }
       };
 
-      const { A2, D3, D4 } = constants[sampleSize as keyof typeof constants] || constants[1];
+      const { A2, D3, D4 } = constants[sampleSize as keyof typeof constants];
 
       const mean = subgroups.reduce((a, b) => a + b.mean, 0) / subgroups.length;
       const rangeMean = subgroups.reduce((a, b) => a + b.range, 0) / subgroups.length;
@@ -281,55 +273,56 @@ export default function AnalysisScreen() {
       const usl = parseFloat(filteredData[0].ToSpecification);
       const lsl = parseFloat(filteredData[0].FromSpecification);
       
-      if (isNaN(usl) || isNaN(lsl)) {
-        setError('Invalid specification limits');
-        setLoading(false);
-        return;
-      }
+      // Calculate standard deviation based on sample size
+      const stdDev = sampleSize === 1 
+        ? Math.sqrt(subgroups.reduce((acc, sg) => acc + Math.pow(sg.mean - mean, 2), 0) / (subgroups.length - 1))
+        : rangeMean / (sampleSize === 2 ? 1.128 : Math.sqrt(sampleSize));
 
-      const stdDev = rangeMean / (sampleSize === 1 ? 1.128 : Math.sqrt(sampleSize));
-      const cp = (usl - lsl) / (6 * stdDev);
-      const cpu = (usl - mean) / (3 * stdDev);
-      const cpl = (mean - lsl) / (3 * stdDev);
-      const cpk = Math.min(cpu, cpl);
+      // Ensure all metrics are finite numbers
+      const calculateMetric = (value: number) => isFinite(value) ? Number(value.toFixed(4)) : 0;
+
+      const cp = calculateMetric((usl - lsl) / (6 * stdDev));
+      const cpu = calculateMetric((usl - mean) / (3 * stdDev));
+      const cpl = calculateMetric((mean - lsl) / (3 * stdDev));
+      const cpk = calculateMetric(Math.min(cpu, cpl));
 
       const distributionData = calculateDistributionData(specifications);
 
       const analysis = {
         metrics: {
-          xBar: Number(mean.toFixed(4)),
-          stdDevOverall: Number(stdDev.toFixed(4)),
-          stdDevWithin: Number(stdDev.toFixed(4)),
-          movingRange: Number(rangeMean.toFixed(4)),
-          cp: Number(cp.toFixed(4)),
-          cpkUpper: Number(cpu.toFixed(4)),
-          cpkLower: Number(cpl.toFixed(4)),
-          cpk: Number(cpk.toFixed(4)),
-          pp: Number(cp.toFixed(4)),
-          ppu: Number(cpu.toFixed(4)),
-          ppl: Number(cpl.toFixed(4)),
-          ppk: Number(cpk.toFixed(4)),
-          lsl: Number(lsl.toFixed(4)),
-          usl: Number(usl.toFixed(4))
+          xBar: calculateMetric(mean),
+          stdDevOverall: calculateMetric(stdDev),
+          stdDevWithin: calculateMetric(stdDev),
+          movingRange: calculateMetric(rangeMean),
+          cp,
+          cpkUpper: cpu,
+          cpkLower: cpl,
+          cpk,
+          pp: cp,
+          ppu: cpu,
+          ppl: cpl,
+          ppk: cpk,
+          lsl: calculateMetric(lsl),
+          usl: calculateMetric(usl)
         },
         controlCharts: {
           xBarData,
           rangeData,
           limits: {
-            xBarUcl: Number(xBarUcl.toFixed(4)),
-            xBarLcl: Number(xBarLcl.toFixed(4)),
-            xBarMean: Number(mean.toFixed(4)),
-            rangeUcl: Number(rangeUcl.toFixed(4)),
-            rangeLcl: Number(rangeLcl.toFixed(4)),
-            rangeMean: Number(rangeMean.toFixed(4))
+            xBarUcl: calculateMetric(xBarUcl),
+            xBarLcl: calculateMetric(xBarLcl),
+            xBarMean: calculateMetric(mean),
+            rangeUcl: calculateMetric(rangeUcl),
+            rangeLcl: calculateMetric(rangeLcl),
+            rangeMean: calculateMetric(rangeMean)
           }
         },
         distribution: {
           data: distributionData.data,
           stats: {
-            mean: Number(mean.toFixed(4)),
-            stdDev: Number(stdDev.toFixed(4)),
-            target: Number(((usl + lsl) / 2).toFixed(4))
+            mean: calculateMetric(mean),
+            stdDev: calculateMetric(stdDev),
+            target: calculateMetric((usl + lsl) / 2)
           },
           numberOfBins: distributionData.numberOfBins
         }
@@ -337,8 +330,8 @@ export default function AnalysisScreen() {
 
       setAnalysisData(analysis);
     } catch (error) {
-      setError('Error analyzing data');
-      console.error('Error analyzing data:', error);
+      console.error('Analysis error:', error);
+      setError(error instanceof Error ? error.message : 'Error analyzing data');
     } finally {
       setLoading(false);
     }
