@@ -42,21 +42,6 @@ interface InspectionData {
   TrnDate: string;
 }
 
-interface Subgroup {
-  mean: number;
-  range: number;
-  values: number[];
-}
-
-// SPC Constants for different sample sizes
-const SPC_CONSTANTS = {
-  1: { A2: 2.66, D3: 0, D4: 3.267, d2: 1.128 },
-  2: { A2: 1.88, D3: 0, D4: 3.267, d2: 1.128 },
-  3: { A2: 1.023, D3: 0, D4: 2.575, d2: 1.693 },
-  4: { A2: 0.729, D3: 0, D4: 2.282, d2: 2.059 },
-  5: { A2: 0.577, D3: 0, D4: 2.115, d2: 2.326 }
-} as const;
-
 export default function AnalysisScreen() {
   const [selectedShifts, setSelectedShifts] = useState<number[]>([]);
   const [material, setMaterial] = useState('');
@@ -94,8 +79,13 @@ export default function AnalysisScreen() {
 
   const loadInitialData = async () => {
     try {
+      setError(null);
       const shiftData = await fetchShiftData();
-      setShifts(shiftData.data);
+      if (shiftData?.data) {
+        setShifts(shiftData.data);
+      } else {
+        setError('Invalid shift data received');
+      }
     } catch (error) {
       setError('Error loading shift data');
       console.error('Error loading initial data:', error);
@@ -110,8 +100,13 @@ export default function AnalysisScreen() {
 
   const loadMaterials = async () => {
     try {
+      setError(null);
       const materialData = await fetchMaterialList(startDate, endDate, selectedShifts);
-      setMaterials(materialData);
+      if (Array.isArray(materialData)) {
+        setMaterials(materialData);
+      } else {
+        setError('Invalid material data received');
+      }
     } catch (error) {
       setError('Error loading materials');
       console.error('Error loading materials:', error);
@@ -126,8 +121,13 @@ export default function AnalysisScreen() {
 
   const loadOperations = async () => {
     try {
+      setError(null);
       const operationData = await fetchOperationList(startDate, endDate, material, selectedShifts);
-      setOperations(operationData);
+      if (Array.isArray(operationData)) {
+        setOperations(operationData);
+      } else {
+        setError('Invalid operation data received');
+      }
     } catch (error) {
       setError('Error loading operations');
       console.error('Error loading operations:', error);
@@ -142,49 +142,72 @@ export default function AnalysisScreen() {
 
   const loadGauges = async () => {
     try {
+      setError(null);
       const gaugeData = await fetchGuageList(startDate, endDate, material, operation, selectedShifts);
-      setGauges(gaugeData);
+      if (Array.isArray(gaugeData)) {
+        setGauges(gaugeData);
+      } else {
+        setError('Invalid gauge data received');
+      }
     } catch (error) {
       setError('Error loading gauges');
       console.error('Error loading gauges:', error);
     }
   };
 
-  const calculateSubgroups = (data: InspectionData[], size: number): Subgroup[] => {
-    const sortedData = data
-      .map(d => ({
-        ...d,
-        value: parseFloat(d.ActualSpecification),
-        date: new Date(d.TrnDate)
-      }))
-      .sort((a, b) => a.date.getTime() - b.date.getTime());
-
-    if (size === 1) {
-      const values = sortedData.map(d => d.value);
-      const movingRanges = values.slice(1).map((value, i) => Math.abs(value - values[i]));
-      
-      return values.map((value, i) => ({
-        mean: value,
-        range: i === 0 ? movingRanges[0] : movingRanges[i - 1],
-        values: [value]
-      }));
+  const calculateSubgroups = (data: number[], size: number) => {
+    if (!Array.isArray(data) || data.length === 0) {
+      return [];
     }
 
-    const subgroups: Subgroup[] = [];
-    for (let i = 0; i < sortedData.length; i += size) {
-      const subgroup = sortedData.slice(i, i + size);
+    const subgroups = [];
+    for (let i = 0; i < data.length; i += size) {
+      const subgroup = data.slice(i, i + size);
       if (subgroup.length === size) {
-        const values = subgroup.map(d => d.value);
-        const subgroupRange = Math.max(...values) - Math.min(...values);
-        subgroups.push({
-          mean: values.reduce((a, b) => a + b, 0) / size,
-          range: Math.max(subgroupRange, 0.0001),
-          values
-        });
+        const validNumbers = subgroup.every(num => !isNaN(num));
+        if (validNumbers) {
+          subgroups.push({
+            mean: subgroup.reduce((a, b) => a + b, 0) / size,
+            range: Math.max(...subgroup) - Math.min(...subgroup)
+          });
+        }
       }
     }
-    
     return subgroups;
+  };
+
+  const calculateDistributionData = (specifications: number[]) => {
+    if (!Array.isArray(specifications) || specifications.length === 0) {
+      return { data: [], numberOfBins: 0 };
+    }
+
+    const validSpecs = specifications.filter(spec => !isNaN(spec));
+    if (validSpecs.length === 0) {
+      return { data: [], numberOfBins: 0 };
+    }
+
+    const numberOfBins = Math.ceil(Math.sqrt(validSpecs.length));
+    
+    const min = Math.min(...validSpecs);
+    const max = Math.max(...validSpecs);
+    const binWidth = (max - min) / numberOfBins;
+    
+    const binCounts = new Array(numberOfBins).fill(0);
+    validSpecs.forEach(spec => {
+      const binIndex = Math.min(
+        Math.floor((spec - min) / binWidth),
+        numberOfBins - 1
+      );
+      binCounts[binIndex]++;
+    });
+
+    return {
+      data: binCounts.map((count, i) => ({
+        x: min + (i * binWidth) + (binWidth / 2),
+        y: count
+      })),
+      numberOfBins
+    };
   };
 
   const handleAnalyze = async () => {
@@ -206,101 +229,73 @@ export default function AnalysisScreen() {
         selectedShifts
       );
 
+      if (!Array.isArray(inspectionData) || inspectionData.length === 0) {
+        setError('No data available for analysis');
+        setLoading(false);
+        return;
+      }
+
       const filteredData = inspectionData.filter((data: { ShiftCode: number; }) => 
         selectedShifts.includes(data.ShiftCode)
       );
 
       if (filteredData.length === 0) {
-        setError('No data available for the selected criteria');
+        setError('No data available for selected shifts');
         setLoading(false);
         return;
       }
 
-      if (filteredData.length < sampleSize) {
-        setError(`Not enough data points. Need at least ${sampleSize} points for sample size ${sampleSize}`);
+      const specifications = filteredData.map(d => parseFloat(d.ActualSpecification))
+        .filter(spec => !isNaN(spec));
+
+      if (specifications.length === 0) {
+        setError('No valid specification data available');
         setLoading(false);
         return;
       }
 
-      const subgroups = calculateSubgroups(filteredData, sampleSize);
+      const subgroups = calculateSubgroups(specifications, sampleSize);
       
-      if (subgroups.length === 0) {
-        setError('Not enough complete subgroups for analysis');
-        setLoading(false);
-        return;
-      }
-
       const xBarData = subgroups.map((sg, i) => ({ x: i + 1, y: sg.mean }));
       const rangeData = subgroups.map((sg, i) => ({ x: i + 1, y: sg.range }));
 
-      const mean = xBarData.reduce((a, b) => a + b.y, 0) / xBarData.length;
+      // Constants for different sample sizes
+      const constants = {
+        1: { A2: 1.880, D3: 0, D4: 3.267 },
+        2: { A2: 1.023, D3: 0, D4: 3.267 },
+        3: { A2: 0.729, D3: 0, D4: 2.575 },
+        4: { A2: 0.577, D3: 0, D4: 2.282 },
+        5: { A2: 0.483, D3: 0, D4: 2.115 }
+      };
 
-      const rangeMean = Math.max(
-        sampleSize === 1
-          ? rangeData.reduce((a, b) => a + b.y, 0) / rangeData.length
-          : rangeData.reduce((a, b) => a + b.y, 0) / rangeData.length,
-        0.0001
-      );
+      const { A2, D3, D4 } = constants[sampleSize as keyof typeof constants] || constants[1];
 
-      const constants = SPC_CONSTANTS[sampleSize as keyof typeof SPC_CONSTANTS];
-      const { A2, D3, D4, d2 } = constants;
-
-      const xBarUcl = sampleSize === 1
-        ? mean + (2.66 * rangeMean)
-        : mean + (A2 * rangeMean);
-
-      const xBarLcl = sampleSize === 1
-        ? mean - (2.66 * rangeMean)
-        : mean - (A2 * rangeMean);
-
+      const mean = subgroups.reduce((a, b) => a + b.mean, 0) / subgroups.length;
+      const rangeMean = subgroups.reduce((a, b) => a + b.range, 0) / subgroups.length;
+      
+      const xBarUcl = mean + (A2 * rangeMean);
+      const xBarLcl = mean - (A2 * rangeMean);
       const rangeUcl = D4 * rangeMean;
       const rangeLcl = D3 * rangeMean;
 
       const usl = parseFloat(filteredData[0].ToSpecification);
       const lsl = parseFloat(filteredData[0].FromSpecification);
-
-      if (usl <= lsl) {
-        setError('Invalid specification limits: USL must be greater than LSL');
+      
+      if (isNaN(usl) || isNaN(lsl)) {
+        setError('Invalid specification limits');
         setLoading(false);
         return;
       }
 
-      const stdDev = Math.max(rangeMean / d2, 0.0001);
-
-      const calculateCapabilityIndex = (value: number) => {
-        if (!isFinite(value) || Math.abs(value) > 1000) {
-          return 999.999;
-        }
-        return value;
-      };
-
-      const cp = calculateCapabilityIndex((usl - lsl) / (6 * stdDev));
-      const cpu = calculateCapabilityIndex((usl - mean) / (3 * stdDev));
-      const cpl = calculateCapabilityIndex((mean - lsl) / (3 * stdDev));
+      const stdDev = rangeMean / (sampleSize === 1 ? 1.128 : Math.sqrt(sampleSize));
+      const cp = (usl - lsl) / (6 * stdDev);
+      const cpu = (usl - mean) / (3 * stdDev);
+      const cpl = (mean - lsl) / (3 * stdDev);
       const cpk = Math.min(cpu, cpl);
 
-      const allValues = subgroups.flatMap(sg => sg.values);
-      const numberOfBins = Math.ceil(Math.sqrt(allValues.length));
-      
-      const min = Math.min(...allValues);
-      const max = Math.max(...allValues);
-      const binWidth = (max - min) / numberOfBins;
-      
-      const binCounts = new Array(numberOfBins).fill(0);
-      allValues.forEach(value => {
-        const binIndex = Math.min(
-          Math.floor((value - min) / binWidth),
-          numberOfBins - 1
-        );
-        binCounts[binIndex]++;
-      });
+      const distributionData = calculateDistributionData(specifications);
 
-      const distributionData = binCounts.map((count, i) => ({
-        x: min + (i * binWidth) + (binWidth / 2),
-        y: count
-      }));
-
-      setAnalysisData({
+      const analysis = {
         metrics: {
           xBar: Number(mean.toFixed(4)),
           stdDevOverall: Number(stdDev.toFixed(4)),
@@ -330,25 +325,38 @@ export default function AnalysisScreen() {
           }
         },
         distribution: {
-          data: distributionData,
+          data: distributionData.data,
           stats: {
             mean: Number(mean.toFixed(4)),
             stdDev: Number(stdDev.toFixed(4)),
             target: Number(((usl + lsl) / 2).toFixed(4))
           },
-          numberOfBins
+          numberOfBins: distributionData.numberOfBins
         }
-      });
+      };
+
+      setAnalysisData(analysis);
     } catch (error) {
+      setError('Error analyzing data');
       console.error('Error analyzing data:', error);
-      setError('Error analyzing data. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleShiftSelection = (values: (string | number)[]) => {
-    setSelectedShifts(values.map(v => Number(v)));
+    try {
+      // Ensure values is an array and contains only numbers
+      const numericValues = values
+        .map(v => Number(v))
+        .filter(v => !isNaN(v));
+      
+      setSelectedShifts(numericValues);
+    } catch (error) {
+      console.error('Error in shift selection:', error);
+      setSelectedShifts([]);
+      setError('Error selecting shifts');
+    }
   };
 
   const generateHTML = () => {

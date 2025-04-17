@@ -14,14 +14,40 @@ interface MultiSelectProps {
   onSelectionChange: (values: (string | number)[]) => void;
 }
 
-export function MultiSelect({ label, options, selectedValues, onSelectionChange }: MultiSelectProps) {
+export function MultiSelect({ 
+  label, 
+  options = [], 
+  selectedValues = [], 
+  onSelectionChange 
+}: MultiSelectProps) {
   const toggleOption = (value: string | number) => {
-    if (selectedValues.includes(value)) {
-      onSelectionChange(selectedValues.filter(v => v !== value));
-    } else {
-      onSelectionChange([...selectedValues, value]);
+    try {
+      if (!Array.isArray(selectedValues)) {
+        onSelectionChange([value]);
+        return;
+      }
+
+      const newValues = selectedValues.includes(value)
+        ? selectedValues.filter(v => v !== value)
+        : [...selectedValues, value];
+
+      onSelectionChange(newValues);
+    } catch (error) {
+      console.error('Error in MultiSelect toggle:', error);
+      // Reset to empty selection on error
+      onSelectionChange([]);
     }
   };
+
+  // Validate selected values against available options
+  const validSelectedValues = selectedValues.filter(value => 
+    options.some(option => option.value === value)
+  );
+
+  // If there's a mismatch, update the selection
+  if (validSelectedValues.length !== selectedValues.length) {
+    onSelectionChange(validSelectedValues);
+  }
 
   return (
     <View style={styles.container}>
@@ -37,7 +63,7 @@ export function MultiSelect({ label, options, selectedValues, onSelectionChange 
             key={`${option.value}-${index}`}
             style={({ pressed }) => [
               styles.option,
-              selectedValues.includes(option.value) && styles.optionSelected,
+              validSelectedValues.includes(option.value) && styles.optionSelected,
               pressed && styles.optionPressed,
               index === options.length - 1 && styles.lastOption,
             ]}
@@ -46,11 +72,11 @@ export function MultiSelect({ label, options, selectedValues, onSelectionChange 
           >
             <Text style={[
               styles.optionText,
-              selectedValues.includes(option.value) && styles.optionTextSelected
+              validSelectedValues.includes(option.value) && styles.optionTextSelected
             ]}>
               {option.label}
             </Text>
-            {selectedValues.includes(option.value) && (
+            {validSelectedValues.includes(option.value) && (
               <Check size={16} color="#fff" strokeWidth={2.5} />
             )}
           </Pressable>
